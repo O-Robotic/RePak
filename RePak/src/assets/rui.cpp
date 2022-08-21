@@ -1,24 +1,68 @@
 #include "pch.h"
 #include "Assets.h"
+#include <dxutils.h>
 
-void Assets::AddUIImageAsset(std::vector<RPakAssetEntryV8>* assetEntries, const char* assetPath, rapidjson::Value& mapEntry)
+void Assets::AddUIImageAsset_v10(std::vector<RPakAssetEntry>* assetEntries, const char* assetPath, rapidjson::Value& mapEntry)
 {
-    Debug("Adding uimg asset '%s'\n", assetPath);
+    Log("Adding uimg asset '%s'\n", assetPath);
 
     std::string sAssetName = assetPath;
+
+    ///////////////////////
+    // JSON VALIDATION
+    {
+        // atlas checks
+        if (!mapEntry.HasMember("atlas"))
+            Error("Required field 'atlas' not found for uimg asset '%s'. Exiting...\n", assetPath);
+        else if (!mapEntry["atlas"].IsString())
+            Error("'atlas' field is not of required type 'string' for uimg asset '%s'. Exiting...\n", assetPath);
+
+        // textures checks
+        if (!mapEntry.HasMember("textures"))
+            Error("Required field 'textures' not found for uimg asset '%s'. Exiting...\n", assetPath);
+        else if (!mapEntry["textures"].IsArray())
+            Error("'textures' field is not of required type 'array' for uimg asset '%s'. Exiting...\n", assetPath);
+
+        // validate fields for each texture
+        for (auto& it : mapEntry["textures"].GetArray())
+        {
+            if (!it.HasMember("path"))
+                Error("Required field 'path' not found for a texture in uimg asset '%s'. Exiting...\n", assetPath);
+            else if (!it["path"].IsString())
+                Error("'path' field is not of required type 'string' for a texture in uimg asset '%s'. Exiting...\n", assetPath);
+
+            if (!it.HasMember("width"))
+                Error("Required field 'width' not found for texture '%s' in uimg asset '%s'. Exiting...\n", it["path"].GetString(), assetPath);
+            else if (!it["width"].IsNumber())
+                Error("'width' field is not of required type 'number' for texture '%s' in uimg asset '%s'. Exiting...\n", it["path"].GetString(), assetPath);
+
+            if (!it.HasMember("height"))
+                Error("Required field 'height' not found for texture '%s' in uimg asset '%s'. Exiting...\n", it["path"].GetString(), assetPath);
+            else if (!it["height"].IsNumber())
+                Error("'height' field is not of required type 'number' for texture '%s' in uimg asset '%s'. Exiting...\n", it["path"].GetString(), assetPath);
+
+            if (!it.HasMember("posX"))
+                Error("Required field 'posX' not found for texture '%s' in uimg asset '%s'. Exiting...\n", it["path"].GetString(), assetPath);
+            else if (!it["posX"].IsNumber())
+                Error("'posX' field is not of required type 'number' for texture '%s' in uimg asset '%s'. Exiting...\n", it["path"].GetString(), assetPath);
+
+            if (!it.HasMember("posY"))
+                Error("Required field 'posY' not found for texture '%s' in uimg asset '%s'. Exiting...\n", it["path"].GetString(), assetPath);
+            else if (!it["posY"].IsNumber())
+                Error("'posY' field is not of required type 'number' for texture '%s' in uimg asset '%s'. Exiting...\n", it["path"].GetString(), assetPath);
+        }
+    }
 
     // get the info for the ui atlas image
     std::string sAtlasFilePath = g_sAssetsDir + mapEntry["atlas"].GetStdString() + ".dds";
     std::string sAtlasAssetName = mapEntry["atlas"].GetStdString() + ".rpak";
     uint64_t atlasGuid = RTech::StringToGuid(sAtlasAssetName.c_str());
 
-    RPakAssetEntryV8* atlasAsset = RePak::GetAssetByGuid(assetEntries, atlasGuid, nullptr);
+    // get the txtr asset that this asset is using
+    RPakAssetEntry* atlasAsset = RePak::GetAssetByGuid(assetEntries, atlasGuid, nullptr);
 
-    if (atlasAsset == nullptr)
-    {
+    if (!atlasAsset)
         Error("Atlas asset was not found when trying to add uimg asset '%s'. Make sure that the txtr is above the uimg in your map file. Exiting...\n", assetPath);
-        exit(EXIT_FAILURE);
-    }
 
     uint32_t nTexturesCount = mapEntry["textures"].GetArray().Size();
 
@@ -31,13 +75,15 @@ void Assets::AddUIImageAsset(std::vector<RPakAssetEntryV8>* assetEntries, const 
     atlas.close();
 
     UIImageHeader* pHdr = new UIImageHeader();
-    pHdr->width = ddsh.width;
-    pHdr->height = ddsh.height;
+    pHdr->m_nWidth = ddsh.dwWidth;
+    pHdr->m_nHeight = ddsh.dwHeight;
 
-    pHdr->textureOffsetsCount = nTexturesCount;
-    pHdr->textureCount = nTexturesCount == 1 ? 0 : nTexturesCount; // don't even ask
-
-    pHdr->atlasGuid = atlasGuid;
+    // legion uses this to get the texture count, so its probably set correctly
+    pHdr->m_nTextureOffsetsCount = nTexturesCount;
+    // unused by legion? - might not be correct
+    //pHdr->textureCount = nTexturesCount <= 1 ? 0 : nTexturesCount - 1; // don't even ask
+    pHdr->m_nTextureCount = 0;
+    pHdr->m_nAtlasGUID = atlasGuid;
 
     // calculate data sizes so we can allocate a page and segment
     uint32_t textureOffsetsDataSize = sizeof(UIImageOffset) * nTexturesCount;
@@ -47,43 +93,50 @@ void Assets::AddUIImageAsset(std::vector<RPakAssetEntryV8>* assetEntries, const 
     // get total size
     uint32_t textureInfoPageSize = textureOffsetsDataSize + textureDimensionsDataSize + textureHashesDataSize /*+ (4 * nTexturesCount)*/;
 
-    // allocate the page and segment
-    RPakVirtualSegment SubHeaderSegment;
-    _vseginfo_t subhdrinfo = RePak::CreateNewSegment(sizeof(UIImageHeader), 0x40, 8, SubHeaderSegment);
+    // asset header
+    _vseginfo_t subhdrinfo = RePak::CreateNewSegment(sizeof(UIImageHeader), 0x40, 8);
 
-    RPakVirtualSegment TextureInfoSegment;
-    _vseginfo_t tiseginfo = RePak::CreateNewSegment(textureInfoPageSize, 0x41, 32, TextureInfoSegment);
+    // ui image/texture info
+    _vseginfo_t tiseginfo = RePak::CreateNewSegment(textureInfoPageSize, 0x41, 32);
 
-    RPakVirtualSegment RawDataSegment;
-    _vseginfo_t dataseginfo = RePak::CreateNewSegment(nTexturesCount * 0x10, 0x43, 4, RawDataSegment);
+    // cpu data
+    _vseginfo_t dataseginfo = RePak::CreateNewSegment(nTexturesCount * 0x10, 0x43, 4);
 
     // register our descriptors so they get converted properly
-    RePak::RegisterDescriptor(subhdrinfo.index, offsetof(UIImageHeader, pTextureOffsets));
-    RePak::RegisterDescriptor(subhdrinfo.index, offsetof(UIImageHeader, pTextureDims));
-    RePak::RegisterDescriptor(subhdrinfo.index, offsetof(UIImageHeader, pTextureHashes));
+    RePak::RegisterDescriptor(subhdrinfo.index, offsetof(UIImageHeader, m_pTextureOffsets));
+    RePak::RegisterDescriptor(subhdrinfo.index, offsetof(UIImageHeader, m_pTextureDims));
+    RePak::RegisterDescriptor(subhdrinfo.index, offsetof(UIImageHeader, m_pTextureHashes));
 
     // textureGUID descriptors
-    RePak::RegisterGuidDescriptor(subhdrinfo.index, offsetof(UIImageHeader, atlasGuid));
+    RePak::RegisterGuidDescriptor(subhdrinfo.index, offsetof(UIImageHeader, m_nAtlasGUID));
 
     // buffer for texture info data
-    char* pTextureInfoBuf = new char[textureInfoPageSize]{};
+    char* pTextureInfoBuf = new char[textureInfoPageSize] {};
     rmem tiBuf(pTextureInfoBuf);
 
     // set texture offset page index and offset
-    pHdr->pTextureOffsets = { tiseginfo.index, 0 };
+    pHdr->m_pTextureOffsets = { tiseginfo.index, 0 };
 
     ////////////////////
     // IMAGE OFFSETS
     for (auto& it : mapEntry["textures"].GetArray())
     {
         UIImageOffset uiio{};
+        float startX = it["posX"].GetFloat() / pHdr->m_nWidth;
+        float endX = (it["posX"].GetFloat() + it["width"].GetFloat()) / pHdr->m_nWidth;
+
+        float startY = it["posY"].GetFloat() / pHdr->m_nHeight;
+        float endY = (it["posY"].GetFloat() + it["height"].GetFloat()) / pHdr->m_nHeight;
+
+        // this doesnt affect legion but does affect game?
+        //uiio.InitUIImageOffset(startX, startY, endX, endY);
         tiBuf.write(uiio);
     }
 
     ///////////////////////
     // IMAGE DIMENSIONS
     // set texture dimensions page index and offset
-    pHdr->pTextureDims = { tiseginfo.index, textureOffsetsDataSize };
+    pHdr->m_pTextureDims = { tiseginfo.index, textureOffsetsDataSize };
 
     for (auto& it : mapEntry["textures"].GetArray())
     {
@@ -92,7 +145,7 @@ void Assets::AddUIImageAsset(std::vector<RPakAssetEntryV8>* assetEntries, const 
     }
 
     // set texture hashes page index and offset
-    pHdr->pTextureHashes = { tiseginfo.index, textureOffsetsDataSize + textureDimensionsDataSize };
+    pHdr->m_pTextureHashes = { tiseginfo.index, textureOffsetsDataSize + textureDimensionsDataSize };
 
     uint32_t nextStringTableOffset = 0;
 
@@ -112,17 +165,24 @@ void Assets::AddUIImageAsset(std::vector<RPakAssetEntryV8>* assetEntries, const 
     // add the file relation from this uimg asset to the atlas txtr
     size_t fileRelationIdx = RePak::AddFileRelation(assetEntries->size());
 
-    atlasAsset->RelationsStartIndex = fileRelationIdx;
-    atlasAsset->RelationsCount++;
+    atlasAsset->m_nRelationsStartIdx = fileRelationIdx;
+    atlasAsset->m_nRelationsCounts++;
 
     char* pUVBuf = new char[nTexturesCount * sizeof(UIImageUV)];
     rmem uvBuf(pUVBuf);
 
     //////////////
     // IMAGE UVS
-    for (uint32_t i = 0; i < nTexturesCount; ++i)
+    for (auto& it : mapEntry["textures"].GetArray())
     {
         UIImageUV uiiu{};
+        float uv0x = it["posX"].GetFloat() / pHdr->m_nWidth;
+        float uv1x = it["width"].GetFloat() / pHdr->m_nWidth;
+        Log("X: %f -> %f\n", uv0x, uv0x + uv1x);
+        float uv0y = it["posY"].GetFloat() / pHdr->m_nHeight;
+        float uv1y = it["height"].GetFloat() / pHdr->m_nHeight;
+        Log("Y: %f -> %f\n", uv0y, uv0y + uv1y);
+        uiiu.InitUIImageUV(uv0x, uv0y, uv1x, uv1y);
         uvBuf.write(uiiu);
     }
 
@@ -136,15 +196,15 @@ void Assets::AddUIImageAsset(std::vector<RPakAssetEntryV8>* assetEntries, const 
     RePak::AddRawDataBlock(rdb);
 
     // create and init the asset entry
-    RPakAssetEntryV8 asset;
+    RPakAssetEntry asset;
     asset.InitAsset(RTech::StringToGuid((sAssetName + ".rpak").c_str()), subhdrinfo.index, 0, subhdrinfo.size, dataseginfo.index, 0, -1, -1, (std::uint32_t)AssetType::UIMG);
-    asset.Version = UIMG_VERSION;
+    asset.m_nVersion = UIMG_VERSION;
 
-    asset.PageEnd = dataseginfo.index + 1; // number of the highest page that the asset references pageidx + 1
-    asset.Un2 = 2;
+    asset.m_nPageEnd = dataseginfo.index + 1; // number of the highest page that the asset references pageidx + 1
+    asset.unk1 = 2;
 
-    asset.UsesStartIndex = fileRelationIdx;
-    asset.UsesCount = 1; // the asset should only use 1 other asset for the atlas
+    asset.m_nUsesStartIdx = fileRelationIdx;
+    asset.m_nUsesCount = 1; // the asset should only use 1 other asset for the atlas
 
     // add the asset entry
     assetEntries->push_back(asset);

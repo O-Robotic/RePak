@@ -5,44 +5,45 @@ using namespace rapidjson;
 
 // purpose: create page and segment with the specified parameters
 // idk what the second field is so "a2" is good enough
-RPakVirtualSegment& GetMatchingSegment(uint32_t flags, uint32_t a2, uint32_t* segidx)
+RPakVirtualSegment GetMatchingSegment(uint32_t flags, uint32_t a2, uint32_t* segidx)
 {
     uint32_t i = 0;
     for (auto& it : g_vvSegments)
     {
-        if (it.DataFlag == flags && it.SomeType == a2)
+        if (it.m_nDataFlag == flags && it.m_nSomeType == a2)
         {
             *segidx = i;
             return it;
         }
         i++;
     }
-    RPakVirtualSegment ret{ flags, a2, 0 };
-    return ret;
+
+    return { flags, a2, 0 };
 }
 
 // purpose: create page and segment with the specified parameters
 // returns: page index
-_vseginfo_t RePak::CreateNewSegment(uint32_t size, uint32_t flags_maybe, uint32_t alignment, RPakVirtualSegment& seg_arg, uint32_t vsegAlignment)
+_vseginfo_t RePak::CreateNewSegment(uint32_t size, uint32_t flags_maybe, uint32_t alignment, uint32_t vsegAlignment)
 {
-    uint32_t vsegidx = g_vvSegments.size();
+    uint32_t vsegidx = (uint32_t)g_vvSegments.size();
     
     // find existing "segment" with the same values or create a new one, this is to overcome the engine's limit of having max 20 of these
     // since otherwise we write into unintended parts of the stack, and that's bad
-    RPakVirtualSegment& seg = GetMatchingSegment(flags_maybe, vsegAlignment == -1 ? alignment : vsegAlignment, &vsegidx);
+    RPakVirtualSegment seg = GetMatchingSegment(flags_maybe, vsegAlignment == -1 ? alignment : vsegAlignment, &vsegidx);
 
-    bool bShouldAddVSeg = seg.DataSize == 0;
-    seg.DataSize += size;
+    bool bShouldAddVSeg = seg.m_nDataSize == 0;
+    seg.m_nDataSize += size;
 
-    if(bShouldAddVSeg)
+    if (bShouldAddVSeg)
         g_vvSegments.emplace_back(seg);
+    else
+        g_vvSegments[vsegidx] = seg;
 
     RPakPageInfo vsegblock{ vsegidx, alignment, size };
 
     g_vPages.emplace_back(vsegblock);
-    uint32_t pageidx = g_vPages.size() - 1;
+    uint32_t pageidx = (uint32_t)g_vPages.size() - 1;
 
-    seg_arg = seg;
     return { pageidx, size};
 }
 
@@ -71,12 +72,12 @@ size_t RePak::AddFileRelation(uint32_t assetIdx, uint32_t count)
     return g_vFileRelations.size()-count; // return the index of the file relation(s)
 }
 
-RPakAssetEntryV8* RePak::GetAssetByGuid(std::vector<RPakAssetEntryV8>* assets, uint64_t guid, uint32_t* idx)
+RPakAssetEntry* RePak::GetAssetByGuid(std::vector<RPakAssetEntry>* assets, uint64_t guid, uint32_t* idx)
 {
     uint32_t i = 0;
     for (auto& it : *assets)
     {
-        if (it.GUID == guid)
+        if (it.m_nGUID == guid)
         {
             if (idx)
                 *idx = i;
@@ -84,6 +85,7 @@ RPakAssetEntryV8* RePak::GetAssetByGuid(std::vector<RPakAssetEntryV8>* assets, u
         }
         i++;
     }
+    Debug("failed to find asset with guid %llX\n", guid);
     return nullptr;
 }
 
@@ -91,32 +93,24 @@ void WriteRPakRawDataBlock(BinaryIO& out, std::vector<RPakRawDataBlock>& rawData
 {
     for (auto it = rawDataBlock.begin(); it != rawDataBlock.end(); ++it)
     {
-        out.getWriter()->write((char*)it->dataPtr, it->dataSize);
+        out.getWriter()->write((char*)it->m_nDataPtr, it->m_nDataSize);
     }
 }
 
 int main(int argc, char** argv)
 {
     if (argc < 2)
-    {
         Error("invalid usage\n");
-        return EXIT_FAILURE;
-    }
 
     std::filesystem::path mapPath(argv[1]);
+
     if (!FILE_EXISTS(argv[1]))
-    {
         Error("couldn't find map file\n");
-        return EXIT_FAILURE;
-    }
 
     std::ifstream ifs(argv[1]);
 
     if (!ifs.is_open())
-    {
         Error("couldn't open map file.\n");
-        return EXIT_FAILURE;
-    }
 
     // begin json parsing
     IStreamWrapper isw{ ifs };
@@ -171,22 +165,31 @@ int main(int argc, char** argv)
         // ensure that the path has a slash at the end
         Utils::AppendSlash(sOutputDir);
     }
+
+    if (!doc.HasMember("files"))
+        Warning("No 'files' field specified, the RPak will contain no assets...\n");
+    else if (!doc["files"].IsArray())
+        Error("'files' field is not of required type 'array'. Exiting...\n");
+
     // end json parsing
+    RPakFileBase* rpakFile = new RPakFileBase();
+    
+    if (!doc.HasMember("version"))
+        Error("No RPak file version specified. Valid options:\n7 - Titanfall 2\n8 - Apex Legends\nExiting...\n");
+    else if ( !doc["version"].IsInt() )
+        Error("Invalid RPak file version specified. Valid options:\n7 - Titanfall 2\n8 - Apex Legends\nExiting...\n");
+
+    int rpakVersion = doc["version"].GetInt();
+
+    rpakFile->SetVersion(rpakVersion);
 
     Log("building rpak %s.rpak\n\n", sRpakName.c_str());
-
-    std::vector<RPakAssetEntryV8> assetEntries{ };
 
     // build asset data
     // loop through all assets defined in the map json
     for (auto& file : doc["files"].GetArray())
     {
-        ASSET_HANDLER("txtr", file, assetEntries, Assets::AddTextureAsset);
-        ASSET_HANDLER("uimg", file, assetEntries, Assets::AddUIImageAsset);
-        ASSET_HANDLER("Ptch", file, assetEntries, Assets::AddPatchAsset);
-        ASSET_HANDLER("dtbl", file, assetEntries, Assets::AddDataTableAsset);
-        ASSET_HANDLER("rmdl", file, assetEntries, Assets::AddModelAsset);
-        ASSET_HANDLER("matl", file, assetEntries, Assets::AddMaterialAsset);
+        rpakFile->HandleAsset(file);
     }
 
     std::filesystem::create_directories(sOutputDir); // create directory if it does not exist yet.
@@ -197,9 +200,12 @@ int main(int argc, char** argv)
 
     // write a placeholder header so we can come back and complete it
     // when we have all the info
-    RPakFileHeaderV8 rpakHeader{ };
-    out.write(rpakHeader);
+    
+    // RPAKFILE WRITE HEADER
 
+    rpakFile->WriteHeader(&out);
+
+    // write string vectors for starpak paths and get the total length of each vector
     size_t StarpakRefLength = Utils::WriteStringVector(out, Assets::g_vsStarpakPaths);
     size_t OptStarpakRefLength = Utils::WriteStringVector(out, Assets::g_vsOptStarpakPaths);
 
@@ -207,38 +213,42 @@ int main(int argc, char** argv)
     WRITE_VECTOR(out, g_vvSegments);
     WRITE_VECTOR(out, g_vPages);
     WRITE_VECTOR(out, g_vDescriptors);
-    WRITE_VECTOR(out, assetEntries);
+    rpakFile->WriteAssets(&out);
     WRITE_VECTOR(out, g_vGuidDescriptors);
     WRITE_VECTOR(out, g_vFileRelations);
+
+    // now the actual paged data
+    // this should probably be writing by page instead of just hoping that
+    // the data blocks are in the right order
     WriteRPakRawDataBlock(out, g_vRawDataBlocks);
 
     // get current time as FILETIME
     FILETIME ft = Utils::GetFileTimeBySystem();
 
-    // set up the file header
-    rpakHeader.CreatedTime = static_cast<__int64>(ft.dwHighDateTime) << 32 | ft.dwLowDateTime; // write the current time into the file as FILETIME
-    rpakHeader.CompressedSize = out.tell();
-    rpakHeader.DecompressedSize = out.tell();
-    rpakHeader.VirtualSegmentCount = g_vvSegments.size();
-    rpakHeader.PageCount = g_vPages.size();
-    rpakHeader.DescriptorCount = g_vDescriptors.size();
-    rpakHeader.GuidDescriptorCount = g_vGuidDescriptors.size();
-    rpakHeader.RelationsCount = g_vFileRelations.size();
-    rpakHeader.AssetEntryCount = assetEntries.size();
-    rpakHeader.StarpakReferenceSize = StarpakRefLength;
-    rpakHeader.StarpakOptReferenceSize = OptStarpakRefLength;
+    rpakFile->header.m_nCreatedTime = static_cast<__int64>(ft.dwHighDateTime) << 32 | ft.dwLowDateTime; // write the current time into the file as FILETIME
+    rpakFile->header.m_nSizeDisk = out.tell();
+    rpakFile->header.m_nSizeMemory = out.tell();
+    rpakFile->header.m_nVirtualSegmentCount = (uint16_t)g_vvSegments.size();
+    rpakFile->header.m_nPageCount = (uint16_t)g_vPages.size();
+    rpakFile->header.m_nDescriptorCount = (uint32_t)g_vDescriptors.size();
+    rpakFile->header.m_nGuidDescriptorCount = (uint32_t)g_vGuidDescriptors.size();
+    rpakFile->header.m_nRelationsCount = (uint32_t)g_vFileRelations.size();
+    rpakFile->header.m_nAssetEntryCount = rpakFile->GetAssetCount();
+    rpakFile->header.m_nStarpakReferenceSize = (uint16_t)StarpakRefLength;
+    rpakFile->header.m_nStarpakOptReferenceSize = (uint16_t)OptStarpakRefLength;
 
     out.seek(0); // Go back to the beginning to finally write the rpakHeader now.
 
-    out.write(rpakHeader); // Re-write rpak header.
-    
+    rpakFile->WriteHeader(&out);
+
     out.close();
 
     // free the memory
     for (auto& it : g_vRawDataBlocks)
     {
-        delete it.dataPtr;
+        delete it.m_nDataPtr;
     }
+    delete rpakFile;
 
     // write starpak data
     if (Assets::g_vsStarpakPaths.size() == 1)
@@ -268,7 +278,7 @@ int main(int argc, char** argv)
 
         for (auto& it : Assets::g_vSRPkDataEntries)
         {
-            srpkOut.getWriter()->write((const char*)it.dataPtr, it.dataSize);
+            srpkOut.getWriter()->write((const char*)it.m_nDataPtr, it.m_nDataSize);
         }
 
         // starpaks have a table of sorts at the end of the file, containing the offsets and data sizes for every data block
@@ -276,8 +286,8 @@ int main(int argc, char** argv)
         for (auto& it : Assets::g_vSRPkDataEntries)
         {
             SRPkFileEntry fe{};
-            fe.offset = it.offset;
-            fe.size = it.dataSize;
+            fe.m_nOffset= it.m_nOffset;
+            fe.m_nSize = it.m_nDataSize;
 
             srpkOut.write(fe);
         }

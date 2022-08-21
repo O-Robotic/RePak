@@ -1,7 +1,12 @@
 #include "pch.h"
 #include "Assets.h"
 
-void Assets::AddModelAsset(std::vector<RPakAssetEntryV8>* assetEntries, const char* assetPath, rapidjson::Value& mapEntry)
+void Assets::AddModelAsset_stub(std::vector<RPakAssetEntry>* assetEntries, const char* assetPath, rapidjson::Value& mapEntry)
+{
+    Error("RPak version 7 (Titanfall 2) cannot contain models");
+}
+
+void Assets::AddModelAsset_v9(std::vector<RPakAssetEntry>* assetEntries, const char* assetPath, rapidjson::Value& mapEntry)
 {
     Debug("Adding mdl_ asset '%s'\n", assetPath);
 
@@ -31,17 +36,18 @@ void Assets::AddModelAsset(std::vector<RPakAssetEntryV8>* assetEntries, const ch
         return;
     }
 
-    // go back to the beginning of the file to read all the data
-    skelInput.seek(0);
-
     uint32_t fileNameDataSize = sAssetName.length() + 1;
 
-    char* pDataBuf = new char[fileNameDataSize + mdlhdr.dataLength];
+    char* pDataBuf = new char[fileNameDataSize + mdlhdr.m_nDataLength];
 
     // write the model file path into the data buffer
     snprintf(pDataBuf, fileNameDataSize, "%s", sAssetName.c_str());
+
+    // go back to the beginning of the file to read all the data
+    skelInput.seek(0);
+
     // write the skeleton data into the data buffer
-    skelInput.getReader()->read(pDataBuf + fileNameDataSize, mdlhdr.dataLength);
+    skelInput.getReader()->read(pDataBuf + fileNameDataSize, mdlhdr.m_nDataLength);
     skelInput.close();
 
     ///--------------------
@@ -80,11 +86,11 @@ void Assets::AddModelAsset(std::vector<RPakAssetEntryV8>* assetEntries, const ch
 
     pHdr->DataCacheSize = vgFileSize;
 
-    RPakVirtualSegment SubHeaderSegment{};
-    _vseginfo_t subhdrinfo = RePak::CreateNewSegment(sizeof(ModelHeader), 0, 8, SubHeaderSegment);
+    // asset header
+    _vseginfo_t subhdrinfo = RePak::CreateNewSegment(sizeof(ModelHeader), 0, 8);
 
-    RPakVirtualSegment DataSegment{};
-    _vseginfo_t dataseginfo = RePak::CreateNewSegment(mdlhdr.dataLength + fileNameDataSize, 1, 64, DataSegment);
+    // data segment
+    _vseginfo_t dataseginfo = RePak::CreateNewSegment(mdlhdr.m_nDataLength + fileNameDataSize, 1, 64);
 
     //RPakVirtualSegment VGSegment{};
     //uint32_t vgIdx = RePak::CreateNewSegment(vgFileSize, 67, 1, DataSegment);
@@ -107,10 +113,10 @@ void Assets::AddModelAsset(std::vector<RPakAssetEntryV8>* assetEntries, const ch
     for (int i = 0; i < mdlhdr.texture_count; ++i)
     {
         materialref_t ref = dataBuf.read<materialref_t>();
+        
         if(ref.guid != 0)
             RePak::RegisterGuidDescriptor(dataseginfo.index, dataBuf.getPosition()-8);
     }
-
 
     RPakRawDataBlock shdb{ subhdrinfo.index, subhdrinfo.size, (uint8_t*)pHdr };
     RePak::AddRawDataBlock(shdb);
@@ -121,24 +127,22 @@ void Assets::AddModelAsset(std::vector<RPakAssetEntryV8>* assetEntries, const ch
     //RPakRawDataBlock vgdb{ vgIdx, vgFileSize, (uint8_t*)pVGBuf };
     //RePak::AddRawDataBlock(vgdb);
 
-    RPakAssetEntryV8 asset;
+    RPakAssetEntry asset;
 
     asset.InitAsset(RTech::StringToGuid(sAssetName.c_str()), subhdrinfo.index, 0, subhdrinfo.size, -1, 0, starpakOffset, -1, (std::uint32_t)AssetType::RMDL);
-    asset.Version = RMDL_VERSION;
+    asset.m_nVersion = RMDL_VERSION;
     // i have literally no idea what these are
-    asset.PageEnd = dataseginfo.index + 1;
-    asset.Un2 = 2;
+    asset.m_nPageEnd = dataseginfo.index + 1;
+    asset.unk1 = 2;
 
-    // note: models use an implicit guid reference to their materials
+    // models use an implicit guid reference to their materials
     // the guids aren't registered but are converted during the loading of the material asset
     // during (what i assume is) regular reference conversion
     // a potential solution to the material guid conversion issue could be just registering the guids?
     // 
     size_t fileRelationIdx = RePak::AddFileRelation(assetEntries->size());
-    asset.UsesStartIndex = fileRelationIdx;
-    asset.UsesCount = 1;
+    asset.m_nUsesStartIdx = fileRelationIdx;
+    asset.m_nUsesCount = 1;
 
     assetEntries->push_back(asset);
-
-    Log("%i\n", g_vsStarpakPaths.size());
 }
